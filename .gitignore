@@ -1,0 +1,35 @@
+# Python bytecode and local tooling
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.venv/
+venv/
+env/
+
+# Editors and operating-system files
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Generated Minecraft host state
+minecraft-host/
+server/
+backups/
+*.log
+*.part
+*.download
+
+# Local credentials and configuration
+.env
+.env.*
+!.env.example
+*.pem
+*.key
