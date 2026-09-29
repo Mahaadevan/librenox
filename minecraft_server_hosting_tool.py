@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Minecraft Server Hosting Tool - terminal server dashboard.
+"""Minecraft Server Hosting Tool - terminal server dashboard (single file).
 
     python minecraft_server_hosting_tool.py              # dashboard + start
     python minecraft_server_hosting_tool.py --no-start   # dashboard only
@@ -33,15 +33,6 @@ import zipfile
 from datetime import datetime
 from pathlib import Path
 
-from minecraft_host_catalog import MOD_API, PAPER_API, get_json, paper_build, release_asset
-from minecraft_host_checks import (find_executable, java_major, lan_ip, port_busy,
-                                   required_java)
-from minecraft_host_config import (BACKUPS, BASE, BIN, CONFIG, DEFAULTS, RUNTIME,
-                                   SERVER, TMP, ensure_directories)
-from minecraft_host_plugins import newest_jar, search_mods, search_plugins
-from minecraft_host_style import (BLUE, BOLD, CYAN, DIM, GREEN, GREY, MAG, RED, WHITE,
-                                  YEL, ANSI_RE, RST, bg, box, fg, fit, visible_length)
-
 IS_WIN = os.name == "nt"
 if IS_WIN:
     import msvcrt
@@ -50,8 +41,68 @@ else:
     import termios
     import tty
 
+# ============================================================== constants ==
 UA = {"User-Agent": "minecraft-server-hosting-tool/1.0"}
+PAPER_API = "https://fill.papermc.io/v3/projects/paper"
+MOD_API = "https://api.modrinth.com/v2"
 GEYSER = "https://download.geysermc.org/v2/projects/{}/versions/latest/builds/latest/downloads/spigot"
+
+JAVA_NAME = "java.exe" if IS_WIN else "java"
+
+# =============================================================== terminal theme ==
+ANSI_RE = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07")
+RST, BOLD = "\033[0m", "\033[1m"
+
+
+def fg(number: int) -> str:
+    return f"\033[38;5;{number}m"
+
+
+def bg(number: int) -> str:
+    return f"\033[48;5;{number}m"
+
+
+# Light blue, yellow, green, pink, and soft neutral colors.
+GREEN, RED, YEL, CYAN = fg(120), fg(203), fg(229), fg(117)
+BLUE, MAG, GREY, WHITE = fg(153), fg(219), fg(246), fg(255)
+
+
+def visible_length(text: str) -> int:
+    return len(ANSI_RE.sub("", text))
+
+
+def clip(text: str, width: int) -> str:
+    output, count, index = [], 0, 0
+    while index < len(text):
+        match = ANSI_RE.match(text, index)
+        if match:
+            output.append(match.group())
+            index = match.end()
+            continue
+        if count >= width:
+            output.append(RST)
+            break
+        output.append(text[index])
+        index += 1
+        count += 1
+    return "".join(output)
+
+
+def fit(text: str, width: int) -> str:
+    clipped = clip(text, width)
+    return clipped + " " * max(0, width - visible_length(clipped))
+
+
+def box(title: str, lines: list, width: int, height: int, accent: str = CYAN) -> list:
+    label = f" {title} "
+    rows = [accent + "╭─" + BOLD + label + RST + accent +
+            "─" * max(0, width - 4 - len(label)) + "╮" + RST]
+    edge = accent + "│" + RST
+    for line in lines[:height - 2]:
+        rows.append(edge + " " + fit(line, width - 4) + RST + " " + edge)
+    rows.extend(edge + " " * (width - 2) + edge for _ in range(max(0, height - 2 - len(lines))))
+    rows.append(accent + "╰" + "─" * (width - 2) + "╯" + RST)
+    return rows
 
 
 def hms(sec: float) -> str:
@@ -67,7 +118,141 @@ def bar(frac, w: int) -> str:
     return GREEN + "█" * n + GREY + "░" * (w - n) + RST
 
 
-# ------------------------------------------------------------------ helpers --
+# ==================================================== config & directories ==
+BASE = Path(__file__).resolve().parent / "minecraft-host"
+SERVER = BASE / "server"
+BIN = BASE / "bin"
+RUNTIME = BASE / "runtime"
+BACKUPS = BASE / "backups"
+TMP = BASE / "tmp"
+CONFIG = BASE / "host.json"
+ENV_FILE = Path(__file__).resolve().parent / ".env"
+
+DEFAULTS = {
+    "version": "", "memory": "2G", "port": 25565, "max_players": 20,
+    "online_mode": True, "motd": "A Minecraft Server", "eula": False,
+    "tunnel": "", "tunnel_address": "", "autotunnel": False,
+}
+
+
+def load_env_file() -> None:
+    """Load simple KEY=value secrets without requiring python-dotenv."""
+    if not ENV_FILE.exists():
+        return
+    try:
+        for raw in ENV_FILE.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            key, value = key.strip(), value.strip().strip("\"'")
+            if key and key not in os.environ:
+                os.environ[key] = value
+    except OSError:
+        pass
+
+
+load_env_file()
+
+
+def ensure_directories() -> None:
+    for path in (BASE, SERVER, BIN, RUNTIME, BACKUPS, TMP):
+        path.mkdir(parents=True, exist_ok=True)
+
+
+def load_config() -> dict:
+    ensure_directories()
+    result = dict(DEFAULTS)
+    if CONFIG.exists():
+        try:
+            result.update(json.loads(CONFIG.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
+            pass
+    return result
+
+
+def save_config(config: dict) -> None:
+    BASE.mkdir(parents=True, exist_ok=True)
+    CONFIG.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
+
+
+# ========================================================= readiness checks ==
+def port_open(port: int, host: str = "127.0.0.1") -> bool:
+    try:
+        with socket.create_connection((host, port), timeout=0.4):
+            return True
+    except OSError:
+        return False
+
+
+def port_busy(port: int) -> bool:
+    return port_open(port)
+
+
+def lan_ip() -> str:
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.connect(("10.255.255.255", 1))  # no packet is actually sent
+        return sock.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        sock.close()
+
+
+def find_executable(folder: Path, name: str) -> Path | None:
+    return next((path for path in folder.rglob(name) if path.parent.name == "bin" and path.is_file()), None)
+
+
+def java_major(executable: str) -> int:
+    try:
+        result = subprocess.run([executable, "-version"], capture_output=True, text=True, timeout=15)
+        match = re.search(r'version "(\d+)(?:\.(\d+))?', result.stderr + result.stdout)
+        if not match:
+            return 0
+        major = int(match.group(1))
+        return int(match.group(2) or 0) if major == 1 else major
+    except (OSError, subprocess.SubprocessError):
+        return 0
+
+
+def required_java(minecraft_version: str) -> int:
+    numbers = [int(part) for part in re.findall(r"\d+", minecraft_version)]
+    if not numbers:
+        return 21
+    if numbers[0] >= 26:
+        return 25
+    minor = numbers[1] if len(numbers) > 1 else 0
+    patch = numbers[2] if len(numbers) > 2 else 0
+    return 21 if minor >= 21 or (minor == 20 and patch >= 5) else 17
+
+
+def locate_java(min_major: int = 0) -> str | None:
+    """Find a usable java without downloading anything.
+
+    Looks in this order: our own private runtimes, JAVA_HOME, then PATH.
+    Returns the first one that meets min_major, or the first one found at
+    all if none meet it, or None if there is no java anywhere.
+    """
+    candidates = []
+    if RUNTIME.exists():
+        for d in sorted(RUNTIME.glob("jre-*")):
+            exe = find_executable(d, JAVA_NAME)
+            if exe:
+                candidates.append(str(exe))
+    home = os.environ.get("JAVA_HOME")
+    if home and (Path(home) / "bin" / JAVA_NAME).exists():
+        candidates.append(str(Path(home) / "bin" / JAVA_NAME))
+    on_path = shutil.which("java")
+    if on_path:
+        candidates.append(on_path)
+    for c in candidates:
+        if java_major(c) >= min_major:
+            return c
+    return candidates[0] if candidates else None
+
+
+# ============================================================= web catalog ==
 def get_json(url: str):
     req = urllib.request.Request(url, headers=UA)
     with urllib.request.urlopen(req, timeout=30) as r:
@@ -106,76 +291,69 @@ def extract(archive: Path, dest: Path) -> None:
                 t.extractall(dest)
 
 
-def port_busy(port: int) -> bool:
-    try:
-        with socket.create_connection(("127.0.0.1", port), timeout=0.4):
-            return True
-    except OSError:
-        return False
-
-
-def lan_ip() -> str:
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("10.255.255.255", 1))  # no packet is actually sent
-        return s.getsockname()[0]
-    except OSError:
-        return "127.0.0.1"
-    finally:
-        s.close()
-
-
-JAVA_NAME = "java.exe" if IS_WIN else "java"
-
-
-def find_exe(folder: Path):
-    for p in folder.rglob(JAVA_NAME):
-        if p.parent.name == "bin" and p.is_file():
-            return p
-    return None
-
-
-def java_major(exe: str) -> int:
-    try:
-        r = subprocess.run([exe, "-version"], capture_output=True, text=True, timeout=15)
-        m = re.search(r'version "(\d+)(?:\.(\d+))?', r.stderr + r.stdout)
-        if not m:
-            return 0
-        major = int(m.group(1))
-        return int(m.group(2) or 0) if major == 1 else major
-    except Exception:
-        return 0
-
-
-def required_java(mc: str) -> int:
-    nums = [int(x) for x in re.findall(r"\d+", mc)]
-    if not nums:
-        return 21
-    if nums[0] >= 26:
-        return 25
-    minor = nums[1] if len(nums) > 1 else 0
-    patch = nums[2] if len(nums) > 2 else 0
-    if minor >= 21 or (minor == 20 and patch >= 5):
-        return 21
-    return 17
-
-
-def pick_asset(assets: list):
-    arm = platform.machine().lower() in ("arm64", "aarch64")
-    oses = ("windows",) if IS_WIN else ("darwin", "macos") if sys.platform == "darwin" else ("linux",)
-    archs = ("aarch64", "arm64") if arm else ("amd64", "x86_64", "x64", "intel")
-    skip = (".sha256", ".sig", ".txt", ".msi", ".deb", ".rpm", ".asc", ".sha512")
-    for a in assets:
-        n = a["name"].lower()
-        if any(o in n for o in oses) and any(x in n for x in archs) and not n.endswith(skip):
-            return a
-    return None
-
-
 def popen_flags() -> dict:
     if IS_WIN:
         return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
     return {"start_new_session": True}
+
+
+def paper_build(version: str = "") -> tuple:
+    project = get_json(PAPER_API)
+    versions = [item for group in project["versions"].values() for item in group
+                if re.fullmatch(r"\d+(\.\d+)+", item)]
+    versions.sort(key=lambda value: tuple(int(part) for part in value.split(".")), reverse=True)
+    if version and version not in versions:
+        raise RuntimeError(f"Paper has no version {version}. Newest: {', '.join(versions[:6])}")
+    for candidate in ([version] if version else versions[:8]):
+        builds = get_json(f"{PAPER_API}/versions/{urllib.parse.quote(candidate)}/builds")
+        builds.sort(key=lambda item: item["id"], reverse=True)
+        stable = [item for item in builds if item.get("channel") == "STABLE"]
+        if stable or builds:
+            return candidate, (stable or builds)[0]
+    raise RuntimeError("No Paper build is currently available.")
+
+
+def modrinth_search(query: str, extra_facets: list, version: str = "") -> list:
+    facets = [list(group) for group in extra_facets]
+    if version:
+        facets.append([f"versions:{version}"])
+    url = f"{MOD_API}/search?query={urllib.parse.quote(query)}&limit=6&facets={urllib.parse.quote(json.dumps(facets))}"
+    return get_json(url).get("hits", [])
+
+
+def search_plugins(query: str, version: str = "") -> list:
+    return modrinth_search(query, [["categories:paper", "categories:spigot", "categories:bukkit"],
+                                    ["project_type:plugin"]], version)
+
+
+def search_mods(query: str, version: str = "") -> list:
+    return modrinth_search(query, [["project_type:mod"]], version)
+
+
+def newest_jar(project_id: str, loaders: list, version: str = "") -> dict:
+    params = {"loaders": json.dumps(loaders)}
+    if version:
+        params["game_versions"] = json.dumps([version])
+    url = f"{MOD_API}/project/{project_id}/version?{urllib.parse.urlencode(params)}"
+    versions = get_json(url)
+    for version_info in versions:
+        jars = [item for item in version_info.get("files", []) if item["filename"].endswith(".jar")]
+        if jars:
+            return next((item for item in jars if item.get("primary")), jars[0])
+    raise RuntimeError("No compatible JAR was published for this project.")
+
+
+def release_asset(repository: str, name: str) -> dict:
+    release = get_json(f"https://api.github.com/repos/{repository}/releases/latest")
+    arm = platform.machine().lower() in ("arm64", "aarch64")
+    os_name = "windows" if IS_WIN else "darwin" if sys.platform == "darwin" else "linux"
+    arch = ("aarch64", "arm64") if arm else ("amd64", "x86_64", "x64", "intel")
+    rejected = (".sha256", ".sig", ".txt", ".msi", ".deb", ".rpm", ".asc", ".sha512")
+    for asset in release.get("assets", []):
+        asset_name = asset["name"].lower()
+        if os_name in asset_name and any(part in asset_name for part in arch) and not asset_name.endswith(rejected):
+            return asset
+    raise RuntimeError(f"No compatible {name} release was found.")
 
 
 # ----------------------------------------------------------------- terminal --
@@ -276,9 +454,12 @@ class Tunnel:
             else:
                 raise RuntimeError(f"Unknown tunnel provider {provider}")
             for i, cmd in enumerate(attempts):
+                child_env = os.environ.copy()
+                if provider == "ngrok" and os.environ.get("MCSHT_NGROK_AUTHTOKEN"):
+                    child_env["NGROK_AUTHTOKEN"] = os.environ["MCSHT_NGROK_AUTHTOKEN"]
                 self.proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                              stderr=subprocess.STDOUT, text=True, encoding="utf-8",
-                                             errors="replace", bufsize=1, **popen_flags())
+                                             errors="replace", bufsize=1, env=child_env, **popen_flags())
                 threading.Thread(target=self.pump, args=(self.proc,), daemon=True).start()
                 time.sleep(4 if provider == "playit" and i == 0 and len(attempts) > 1 else 1.5)
                 if self.alive():
@@ -353,17 +534,12 @@ DONE_RE = re.compile(r"Done \([\d.,]+s\)!")
 JOIN_RE = re.compile(r"^(\S+) joined the game$")
 LEAVE_RE = re.compile(r"^(\S+) left the game$")
 CHAT_RE = re.compile(r"^<[^>]+> ")
+SAVE_DONE_RE = re.compile(r"Saved the (world|game)", re.I)
 
 
 class App:
     def __init__(self):
-        ensure_directories()
-        self.cfg = dict(DEFAULTS)
-        if CONFIG.exists():
-            try:
-                self.cfg.update(json.loads(CONFIG.read_text(encoding="utf-8")))
-            except ValueError:
-                pass
+        self.cfg = load_config()
         self.logs = collections.deque(maxlen=1500)
         self.proc = None
         self.state = "offline"
@@ -382,8 +558,7 @@ class App:
 
     # -- state helpers
     def save(self) -> None:
-        BASE.mkdir(parents=True, exist_ok=True)
-        CONFIG.write_text(json.dumps(self.cfg, indent=2) + "\n", encoding="utf-8")
+        save_config(self.cfg)
 
     def log(self, kind: str, text: str) -> None:
         self.logs.append((datetime.now().strftime("%H:%M:%S"), kind, text))
@@ -425,20 +600,9 @@ class App:
         return paper_build(self.cfg["version"])
 
     def ensure_java(self, need: int) -> str:
-        cands = []
-        if RUNTIME.exists():
-            for d in sorted(RUNTIME.glob("jre-*")):
-                exe = find_exe(d)
-                if exe:
-                    cands.append(str(exe))
-        home = os.environ.get("JAVA_HOME")
-        if home and (Path(home) / "bin" / JAVA_NAME).exists():
-            cands.append(str(Path(home) / "bin" / JAVA_NAME))
-        if shutil.which("java"):
-            cands.append(shutil.which("java"))
-        for c in cands:
-            if java_major(c) >= need:
-                return c
+        found = locate_java(need)
+        if found and java_major(found) >= need:
+            return found
         self.host(f"Java {need}+ not found - downloading a private copy (one time only).")
         osn = "windows" if IS_WIN else "mac" if sys.platform == "darwin" else "linux"
         arch = "aarch64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
@@ -449,7 +613,7 @@ class App:
         dest = RUNTIME / f"jre-{need}"
         extract(archive, dest)
         archive.unlink(missing_ok=True)
-        exe = find_exe(dest)
+        exe = find_executable(dest, JAVA_NAME)
         if not exe:
             raise RuntimeError("Java download unpacked but no java executable was found.")
         if not IS_WIN:
@@ -519,7 +683,14 @@ class App:
         self.state = "preparing"
         try:
             if port_busy(self.cfg["port"]):
-                raise RuntimeError(f"Port {self.cfg['port']} is already in use (another server running?).")
+                # A port can briefly stay bound right after our own server
+                # exits; give it a couple of seconds before giving up.
+                for _ in range(10):
+                    time.sleep(0.2)
+                    if not port_busy(self.cfg["port"]):
+                        break
+                else:
+                    raise RuntimeError(f"Port {self.cfg['port']} is already in use (another server running?).")
             self.set_task("Checking Paper", None)
             version, build = self.resolve_paper()
             if not self.cfg["version"]:
@@ -738,7 +909,9 @@ class App:
         self.host(f"Installed {hit['title']} ({f['filename']}). Restart (R) to load it.")
 
     def mod(self) -> None:
-        q = self.prompt("Search Modrinth mods", "", title="INSTALL MOD")
+        q = self.prompt("Search Modrinth mods", "", title="INSTALL MOD",
+                        hint=["", f"  {YEL}Note: this server runs Paper. Installed mods only work",
+                              "  if you point a separate Fabric/Forge/NeoForge server at them."])
         if not q:
             return
         try:
@@ -755,10 +928,12 @@ class App:
         if not choice or not choice.isdigit() or not 1 <= int(choice) <= len(hits):
             return
         hit = hits[int(choice) - 1]
+
         def install():
             jar = newest_jar(hit["project_id"], ["fabric", "forge", "neoforge", "quilt"], self.cfg["version"])
             self.fetch(jar["url"], SERVER / "mods" / jar["filename"], f"Downloading {hit['title']}")
-            self.host(f"Installed mod {hit['title']}. Use a modded server loader to load it.")
+            self.host(f"Installed mod {hit['title']}. It will only load on a Fabric/Forge/NeoForge server.")
+
         self.work(f"Installing {hit['title']}", install)
 
     def geyser(self) -> None:
@@ -773,7 +948,7 @@ class App:
 
     def checks(self) -> None:
         """Show actionable readiness checks instead of making the user guess."""
-        java = shutil.which("java")
+        java = locate_java()
         checks = [
             ("Server folder", SERVER.exists(), str(SERVER)),
             ("Paper jar", any(SERVER.glob("paper-*.jar")), "downloaded on first start"),
@@ -820,11 +995,19 @@ class App:
             if live:
                 self.send("save-off")
                 self.send("save-all flush")
-                time.sleep(4)
+                deadline = time.time() + 20
+                saved = False
+                while time.time() < deadline:
+                    if any(SAVE_DONE_RE.search(text) for _, kind, text in list(self.logs)[-25:] if kind == "srv"):
+                        saved = True
+                        break
+                    time.sleep(0.25)
+                if not saved:
+                    time.sleep(2)  # fallback grace period if the log line was missed
             try:
                 BACKUPS.mkdir(parents=True, exist_ok=True)
                 target = BACKUPS / f"world-{datetime.now():%Y%m%d-%H%M%S}.zip"
-                skip = {"cache", "logs", "libraries", "versions"}
+                skip = {"cache", "logs", "libraries", "versions", "plugins", "mods"}
                 self.set_task("Creating backup", None)
                 with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as z:
                     for p in SERVER.rglob("*"):
@@ -865,11 +1048,19 @@ class App:
         finally:
             self.inp = self.hint = None
 
+    def confirm(self, question: str, default_yes: bool = False) -> bool:
+        ans = self.prompt(question, "y" if default_yes else "n", title="CONFIRM")
+        if ans is None:
+            return False
+        return ans.lower().startswith("y")
+
     def handle(self, k: str) -> bool:
         k = k[0].lower()
         if self.hint:
             self.hint = None
         if k in ("\r", "\n", "s"):
+            if self.state in ("starting", "online") and not self.confirm("Stop the running server? (y/n)"):
+                return True
             self.toggle()
         elif k == "r":
             self.restart()
@@ -896,6 +1087,8 @@ class App:
         elif k == "e":
             self.settings()
         elif k == "q":
+            if self.state in ("starting", "online") and not self.confirm("Server is running - quit anyway? (y/n)"):
+                return True
             return False
         return True
 
@@ -946,7 +1139,6 @@ class App:
         plugins = len(list((SERVER / "plugins").glob("*.jar"))) if (SERVER / "plugins").exists() else 0
         pl = f"{len(self.players)}/{self.cfg['max_players']}"
         names = ", ".join(sorted(self.players))
-        inner = 40
         srv = [
             f"{GREY}STATUS   {RST}{badge}{up}",
             f"{GREY}VERSION  {RST}Paper {self.cfg['version'] or 'newest'}   {GREY}RAM {RST}{self.cfg['memory']}",
