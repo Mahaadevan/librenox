@@ -3,7 +3,7 @@
 A single-file, terminal-first Minecraft server manager for Paper/Java. It
 automatically prepares the Java runtime and Paper server, then provides a
 colored terminal dashboard for hosting, checks, directories, tunnels,
-plugins, mods, Geyser/Floodgate, console commands, and backups.
+plugins, Geyser/Floodgate, console commands, and backups.
 
 ## One-click start
 
@@ -36,7 +36,7 @@ The tool keeps generated data beside the script:
 
 ```text
 minecraft-host/
-├── server/    Paper, worlds, plugins, mods, logs, properties
+├── server/    Paper, worlds, plugins, logs, properties
 ├── runtime/   private Java runtime downloaded when needed
 ├── bin/       tunnel helper binaries
 ├── backups/   ZIP backups
@@ -50,13 +50,13 @@ server state.
 ## Dashboard keys
 
 `Enter` starts/stops, `R` restarts, `T` opens tunnel setup, `/` sends a Paper
-console command, `P` installs a Paper plugin, `M` installs a Java mod, `G`
-installs Geyser + Floodgate, `B` creates a backup, `K` runs checks, `D` shows
-directories, `A` shows token instructions, `E` edits settings, and `Q` quits.
+console command, `P` installs a Paper plugin, `G` installs Geyser + Floodgate,
+`B` creates a backup, `K` runs checks, `D` shows directories, `A` shows token
+instructions, `E` edits settings, and `Q` quits.
 
-Mods are downloaded into `minecraft-host/server/mods/`; plugins go into
-`minecraft-host/server/plugins/`. A mod requires a compatible mod-loader
-server, while Paper plugins require Paper/Spigot/Bukkit compatibility.
+This Paper-only build does not expose a mod installer because Paper cannot load
+Fabric/Forge/NeoForge mods. Plugins go into
+`minecraft-host/server/plugins/` and require Paper/Spigot/Bukkit compatibility.
 
 ## Tokens and credentials
 
@@ -83,8 +83,8 @@ exposes it; use a tunnel for remote players and keep `online-mode` enabled.
 
 ## Requirements
 
-- Python 3.10 or newer
-- Internet access on first Paper/Java/mod download
+- Python 3.9 or newer
+- Internet access on first Paper/Java/plugin download
 - A real interactive terminal (PowerShell, Windows Terminal, bash, or a Linux
   terminal)
 - For Bedrock crossplay, Geyser/Floodgate are installed by the dashboard; the
@@ -93,3 +93,17 @@ exposes it; use a tunnel for remote players and keep `online-mode` enabled.
 The repository intentionally contains only one Python source file. The
 launchers, README, `.env.example`, `.gitignore`, and LICENSE are support files;
 runtime data is never pushed.
+
+## Verification status
+
+The source and unit tests are verified on Windows in this repository. GitHub
+Actions runs the standard-library tests on Windows, Ubuntu, and macOS. Linux
+musl/Alpine, macOS Intel/Apple Silicon, daemon/service mode, long soak tests,
+firewall integrations, and Task Scheduler/systemd/launchd generation require
+those target environments and are not claimed as locally verified.
+
+The current release is an interactive Paper terminal dashboard. It does not
+yet provide `--daemon`/`--attach` supervisor mode, service-unit generation,
+automatic update scheduling, restore commands, RSS reporting, or full
+cross-platform firewall/keep-awake integration. Those features are deliberately
+not advertised as implemented.

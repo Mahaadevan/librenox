@@ -16,6 +16,7 @@ Press T for public hosting through a tunnel (playit.gg / bore.pub / ngrok).
 from __future__ import annotations
 
 import collections
+import hashlib
 import json
 import os
 import platform
@@ -32,6 +33,7 @@ import urllib.request
 import zipfile
 from datetime import datetime
 from pathlib import Path
+from typing import Optional
 
 IS_WIN = os.name == "nt"
 if IS_WIN:
@@ -176,6 +178,11 @@ def save_config(config: dict) -> None:
     CONFIG.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
 
+def require_supported_python() -> None:
+    if sys.version_info < (3, 9):
+        raise SystemExit("Minecraft Server Hosting Tool requires Python 3.9 or newer.")
+
+
 # ========================================================= readiness checks ==
 def port_open(port: int, host: str = "127.0.0.1") -> bool:
     try:
@@ -200,7 +207,7 @@ def lan_ip() -> str:
         sock.close()
 
 
-def find_executable(folder: Path, name: str) -> Path | None:
+def find_executable(folder: Path, name: str) -> Optional[Path]:
     return next((path for path in folder.rglob(name) if path.parent.name == "bin" and path.is_file()), None)
 
 
@@ -227,7 +234,7 @@ def required_java(minecraft_version: str) -> int:
     return 21 if minor >= 21 or (minor == 20 and patch >= 5) else 17
 
 
-def locate_java(min_major: int = 0) -> str | None:
+def locate_java(min_major: int = 0) -> Optional[str]:
     """Find a usable java without downloading anything.
 
     Looks in this order: our own private runtimes, JAVA_HOME, then PATH.
@@ -259,7 +266,44 @@ def get_json(url: str):
         return json.load(r)
 
 
-def download(url: str, target: Path, progress=None) -> None:
+def hash_file(target: Path, algorithm: str = "sha256") -> str:
+    digest = hashlib.new(algorithm)
+    with target.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _manifest_path() -> Path:
+    return BASE / "download-manifest.json"
+
+
+def _verify_download(target: Path, expected: Optional[str], identity: str) -> None:
+    expected_algorithm = "sha512" if expected and len(expected) == 128 else "sha256"
+    actual = hash_file(target, expected_algorithm)
+    if expected:
+        if actual.lower() != expected.lower():
+            target.unlink(missing_ok=True)
+            raise RuntimeError(f"Checksum mismatch for {identity}; the file was deleted.")
+        return
+    manifest = {}
+    path = _manifest_path()
+    if path.exists():
+        try:
+            manifest = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            manifest = {}
+    previous = manifest.get(identity)
+    if previous and previous != actual:
+        target.unlink(missing_ok=True)
+        raise RuntimeError(f"Previously trusted file changed: {identity}; the file was deleted.")
+    if not previous:
+        print(f"WARNING: {identity} has no published hash. Trusting SHA-256 once: {actual}")
+        manifest[identity] = actual
+        path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+
+def download(url: str, target: Path, progress=None, expected_hash: Optional[str] = None) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(target.name + ".part")
     req = urllib.request.Request(url, headers=UA)
@@ -274,21 +318,46 @@ def download(url: str, target: Path, progress=None) -> None:
             if progress:
                 progress(done / total if total else None)
     tmp.replace(target)
+    _verify_download(target, expected_hash, url)
 
 
 def extract(archive: Path, dest: Path) -> None:
     if dest.exists():
         shutil.rmtree(dest, ignore_errors=True)
     dest.mkdir(parents=True)
+    def safe_member(root: Path, name: str) -> Path:
+        candidate = (root / name).resolve()
+        if Path(name).is_absolute() or ".." in Path(name).parts:
+            raise RuntimeError(f"Unsafe archive member rejected: {name}")
+        if os.path.commonpath((str(root.resolve()), str(candidate))) != str(root.resolve()):
+            raise RuntimeError(f"Archive member escapes destination: {name}")
+        return candidate
+
     if archive.name.endswith(".zip"):
         with zipfile.ZipFile(archive) as z:
-            z.extractall(dest)
+            for member in z.infolist():
+                target = safe_member(dest, member.filename)
+                if member.is_dir():
+                    target.mkdir(parents=True, exist_ok=True)
+                    continue
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with z.open(member) as source, target.open("wb") as output:
+                    shutil.copyfileobj(source, output)
     else:
         with tarfile.open(archive) as t:
             try:
                 t.extractall(dest, filter="data")
             except TypeError:
-                t.extractall(dest)
+                for member in t.getmembers():
+                    target = safe_member(dest, member.name)
+                    if member.issym() or member.islnk() or not (member.isfile() or member.isdir()):
+                        raise RuntimeError(f"Unsafe tar member rejected: {member.name}")
+                    if member.isdir():
+                        target.mkdir(parents=True, exist_ok=True)
+                    else:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        with t.extractfile(member) as source, target.open("wb") as output:
+                            shutil.copyfileobj(source, output)
 
 
 def popen_flags() -> dict:
@@ -572,9 +641,9 @@ class App:
     def clear_task(self) -> None:
         self.task, self.progress = "", None
 
-    def fetch(self, url: str, target: Path, label: str) -> None:
+    def fetch(self, url: str, target: Path, label: str, expected_hash: Optional[str] = None) -> None:
         try:
-            download(url, target, lambda f: self.set_task(label, f))
+            download(url, target, lambda f: self.set_task(label, f), expected_hash)
         finally:
             self.clear_task()
 
@@ -628,7 +697,8 @@ class App:
         if not art or not art.get("url"):
             raise RuntimeError("Paper returned no server download for this build.")
         self.host(f"Downloading Paper {version} build {build['id']} ...")
-        self.fetch(art["url"], jar, f"Downloading Paper {version}")
+        self.fetch(art["url"], jar, f"Downloading Paper {version}",
+                   art.get("checksums", {}).get("sha256"))
         if jar.stat().st_size < 1_000_000:
             jar.unlink(missing_ok=True)
             raise RuntimeError("Paper download was incomplete.")
@@ -644,7 +714,9 @@ class App:
         asset = release_asset(repo, name)
         self.host(f"Downloading {name} ...")
         dl = TMP / asset["name"]
-        self.fetch(asset["browser_download_url"], dl, f"Downloading {name}")
+        digest = asset.get("digest", "")
+        expected = digest.split(":", 1)[1] if digest.startswith("sha256:") else None
+        self.fetch(asset["browser_download_url"], dl, f"Downloading {name}", expected)
         BIN.mkdir(parents=True, exist_ok=True)
         if dl.name.endswith((".zip", ".tar.gz", ".tgz")):
             out = TMP / f"{name}-x"
@@ -723,7 +795,7 @@ class App:
             self.host(f"Server stopped (exit code {code}).")
 
     def ingest(self, line: str) -> None:
-        line = ANSI_RE.sub("", line).replace("\t", "    ")
+        line = ANSI_RE.sub("", line).replace("\t", "    ")[:4000]
         if not line.strip():
             return
         self.log("srv", line)
@@ -779,10 +851,10 @@ class App:
     def ensure_eula(self) -> bool:
         if self.cfg["eula"]:
             return True
-        ans = self.prompt("Accept the Minecraft EULA? (y/n)", "y", title="FIRST RUN",
+        ans = self.prompt("Type yes to accept the Minecraft EULA", "n", title="FIRST RUN",
                           hint=["", f"  {WHITE}By hosting a server you must accept the Minecraft EULA:",
                                 f"  {CYAN}https://aka.ms/MinecraftEULA"])
-        if ans and ans.lower().startswith("y"):
+        if ans and ans.strip().lower() == "yes":
             self.cfg["eula"] = True
             self.save()
             return True
@@ -811,6 +883,9 @@ class App:
 
     # -- extras
     def tunnel_async(self, provider: str) -> None:
+        if not self.cfg["online_mode"]:
+            self.log("err", "Public tunnels require online-mode=true. Enable it before starting a tunnel.")
+            return
         def go():
             try:
                 self.tunnel.start(provider)
@@ -905,36 +980,9 @@ class App:
 
     def _install_plugin(self, hit: dict) -> None:
         f = newest_jar(hit["project_id"], ["paper", "spigot", "bukkit"], self.cfg["version"])
-        self.fetch(f["url"], SERVER / "plugins" / f["filename"], f"Downloading {hit['title']}")
+        self.fetch(f["url"], SERVER / "plugins" / f["filename"], f"Downloading {hit['title']}",
+                   (f.get("hashes") or {}).get("sha512"))
         self.host(f"Installed {hit['title']} ({f['filename']}). Restart (R) to load it.")
-
-    def mod(self) -> None:
-        q = self.prompt("Search Modrinth mods", "", title="INSTALL MOD",
-                        hint=["", f"  {YEL}Note: this server runs Paper. Installed mods only work",
-                              "  if you point a separate Fabric/Forge/NeoForge server at them."])
-        if not q:
-            return
-        try:
-            hits = search_mods(q, self.cfg["version"])
-        except Exception as error:
-            self.log("err", f"Mod search failed: {error}")
-            return
-        if not hits:
-            self.host("No mods found.")
-            return
-        hint = [""] + [f"  {CYAN}{i + 1}{RST}  {WHITE}{h['title']}{GREY} - {h['description'][:70]}"
-                       for i, h in enumerate(hits)]
-        choice = self.prompt(f"Install which? 1-{len(hits)}", "1", hint=hint, title="MOD RESULTS")
-        if not choice or not choice.isdigit() or not 1 <= int(choice) <= len(hits):
-            return
-        hit = hits[int(choice) - 1]
-
-        def install():
-            jar = newest_jar(hit["project_id"], ["fabric", "forge", "neoforge", "quilt"], self.cfg["version"])
-            self.fetch(jar["url"], SERVER / "mods" / jar["filename"], f"Downloading {hit['title']}")
-            self.host(f"Installed mod {hit['title']}. It will only load on a Fabric/Forge/NeoForge server.")
-
-        self.work(f"Installing {hit['title']}", install)
 
     def geyser(self) -> None:
         def go():
@@ -1009,15 +1057,27 @@ class App:
                 target = BACKUPS / f"world-{datetime.now():%Y%m%d-%H%M%S}.zip"
                 skip = {"cache", "logs", "libraries", "versions", "plugins", "mods"}
                 self.set_task("Creating backup", None)
+                required = sum(path.stat().st_size for path in SERVER.rglob("*")
+                               if path.is_file() and path.relative_to(SERVER).parts[0] not in skip)
+                if shutil.disk_usage(BACKUPS).free < required:
+                    raise RuntimeError("Not enough free disk space for this backup.")
+                incomplete = []
+                written = 0
                 with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as z:
                     for p in SERVER.rglob("*"):
                         rel = p.relative_to(SERVER)
                         if p.is_file() and rel.parts[0] not in skip and not p.name.startswith("paper-"):
                             try:
                                 z.write(p, rel)
-                            except OSError:
-                                pass
-                self.host(f"Backup saved: {target} ({target.stat().st_size // 1024 // 1024} MB)")
+                                written += 1
+                            except OSError as error:
+                                incomplete.append(f"{rel}: {error}")
+                if incomplete:
+                    (target.with_suffix(".INCOMPLETE.txt")).write_text(
+                        "\n".join(incomplete), encoding="utf-8")
+                    self.host(f"INCOMPLETE backup: {target}; skipped {len(incomplete)} files.")
+                else:
+                    self.host(f"Backup saved: {target} ({target.stat().st_size // 1024 // 1024} MB, {written} files)")
             finally:
                 if live:
                     self.send("save-on")
@@ -1072,8 +1132,6 @@ class App:
                 self.send(cmd.lstrip("/"))
         elif k == "p":
             self.plugin()
-        elif k == "m":
-            self.mod()
         elif k == "g":
             self.geyser()
         elif k == "k":
@@ -1185,7 +1243,7 @@ class App:
             foot = f" {YEL}{BOLD}{self.inp[0]}{RST} {WHITE}{self.inp[1]}{CYAN}█"
         else:
             keys = [("ENTER", "stop" if st in ("starting", "online") else "start"), ("R", "restart"), ("T", "tunnel"),
-                    ("/", "cmd"), ("P", "plugins"), ("M", "mods"), ("G", "bedrock"), ("B", "backup"),
+                    ("/", "cmd"),                     ("P", "plugins"), ("G", "bedrock"), ("B", "backup"),
                     ("K", "checks"), ("D", "dirs"), ("A", "tokens"), ("E", "settings"), ("Q", "quit")]
             foot = " ".join(f"{bg(238)}{WHITE} {k} {RST}{GREY} {v}{RST}" for k, v in keys)
         rows.append(foot)
@@ -1236,6 +1294,7 @@ class App:
 
 
 if __name__ == "__main__":
+    require_supported_python()
     if "-h" in sys.argv or "--help" in sys.argv:
         print(__doc__)
         raise SystemExit
