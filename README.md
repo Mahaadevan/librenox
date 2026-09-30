@@ -1,109 +1,39 @@
-# Minecraft Server Hosting Tool
+# MC Host - Minecraft Server Launcher (Java)
 
-A single-file, terminal-first Minecraft server manager for Paper/Java. It
-automatically prepares the Java runtime and Paper server, then provides a
-colored terminal dashboard for hosting, checks, directories, tunnels,
-plugins, Geyser/Floodgate, console commands, and backups.
+Multi-server Minecraft hosting with an Aternos/launcher-style web UI. JDK only, no dependencies.
 
-## One-click start
+## Run
+Needs Java 17+ for the tool itself (a newer runtime for Minecraft is fetched automatically).
 
-### Windows
+    ./start.sh        # Linux/macOS
+    start.bat         # Windows
 
-Double-click `start_minecraft_server_hosting_tool.bat`, or run:
+Opens http://localhost:8765. Options: `--port N`, `--bind ADDR` (default 127.0.0.1; anything else
+exposes full server control to your network), `--no-browser`. `build.sh`/`build.bat` rebuild the jar.
 
-```powershell
-.\start_minecraft_server_hosting_tool.bat
-```
+## Features
+- **Home dashboard**: server cards with icon, status, players, address, Start/Stop; add unlimited servers;
+  switch servers from the top-bar menu or sidebar. Several servers can run at once (unique ports auto-assigned).
+- **Software**: Paper, Purpur, Folia, Vanilla, Fabric or a custom jar (Forge etc.). Switch software/version
+  any time (optional backup first), update to newest build, offline fallback to the existing jar.
+- **Options**: every server.properties setting with Normal / Expert toggle, search, per-field reset,
+  live MOTD colour preview, unknown keys and custom properties in Expert. Comments/order preserved.
+- **Icons**: taken from the downloaded server jar when it contains one, otherwise generated; upload your
+  own, pick one from images inside server.jar / plugins / mods, or use a PNG from Files. Saved as the
+  64x64 server-icon.png, so it shows in the Minecraft server list too.
+- **Players**: online list with op/gamemode/kick/ban menu, whitelist, operators, banned players/IPs
+  (commands while running, JSON edit while stopped, Mojang UUID lookup).
+- **Console** with history + quick commands, **Logs** viewer (incl. old .gz logs), **Files** manager
+  (browse, edit, upload, download, rename, delete, unzip), **Worlds** (upload, download, switch, delete).
+- **Add-ons** from Modrinth: plugins, mods, datapacks, with enable/disable; Geyser + Floodgate one-click.
+- **Backups**: manual + scheduled, retention, one-click restore (auto safety backup first), download.
+- **Automation**: scheduled backup/restart/command, auto-stop when empty, crash auto-restart, start with launcher.
+- **Startup**: RAM, JVM presets (default, Aikar, custom), custom Java path.
+- **Network**: playit.gg / bore.pub / ngrok tunnels, custom address. **Overview** shows CPU/RAM graphs.
 
-The launcher creates `.venv` automatically and runs
-`minecraft_server_hosting_tool.py`. It uses only Python's standard library;
-there is no `requirements.txt` and no `pip install` step.
+Data lives in `minecraft-host/servers/<id>/{server,backups,config.json}`. An old single-server
+`minecraft-host/` is migrated automatically into a server called "My Server".
 
-### Linux/macOS
-
-```bash
-chmod +x start_minecraft_server_hosting_tool.sh
-./start_minecraft_server_hosting_tool.sh
-```
-
-The launcher creates `.venv`, creates a private `.env` from `.env.example`,
-and starts the terminal dashboard. Use `--no-start` to open the dashboard
-without starting Paper automatically.
-
-## What is generated
-
-The tool keeps generated data beside the script:
-
-```text
-minecraft-host/
-├── server/    Paper, worlds, plugins, logs, properties
-├── runtime/   private Java runtime downloaded when needed
-├── bin/       tunnel helper binaries
-├── backups/   ZIP backups
-└── tmp/       temporary downloads
-```
-
-The script creates these directories itself. They are intentionally ignored by
-Git because they can contain large binaries, worlds, logs, private keys, and
-server state.
-
-## Dashboard keys
-
-`Enter` starts/stops, `R` restarts, `T` opens tunnel setup, `/` sends a Paper
-console command, `P` installs a Paper plugin, `G` installs Geyser + Floodgate,
-`B` creates a backup, `K` runs checks, `D` shows directories, `A` shows token
-instructions, `E` edits settings, and `Q` quits.
-
-This Paper-only build does not expose a mod installer because Paper cannot load
-Fabric/Forge/NeoForge mods. Plugins go into
-`minecraft-host/server/plugins/` and require Paper/Spigot/Bukkit compatibility.
-
-## Tokens and credentials
-
-`.env` is local-only and is ignored by Git. Never commit it. Copy
-`.env.example` to `.env` if you need a local provider variable:
-
-```text
-MCSHT_NGROK_AUTHTOKEN=replace_me
-```
-
-The tool does not need tokens for Paper, Modrinth, Geyser, Playit, or Bore.
-For ngrok, use the provider command shown by the `A` panel:
-
-```text
-ngrok config add-authtoken YOUR_TOKEN
-```
-
-For Google Drive, use `rclone config`, complete its browser OAuth flow, and
-keep credentials in rclone's own protected configuration. Do not put Google
-credentials in `.env`.
-
-The tool does not query or print your public IP. Direct router forwarding
-exposes it; use a tunnel for remote players and keep `online-mode` enabled.
-
-## Requirements
-
-- Python 3.9 or newer
-- Internet access on first Paper/Java/plugin download
-- A real interactive terminal (PowerShell, Windows Terminal, bash, or a Linux
-  terminal)
-- For Bedrock crossplay, Geyser/Floodgate are installed by the dashboard; the
-  official Bedrock client/server licensing still applies.
-
-The repository intentionally contains only one Python source file. The
-launchers, README, `.env.example`, `.gitignore`, and LICENSE are support files;
-runtime data is never pushed.
-
-## Verification status
-
-The source and unit tests are verified on Windows in this repository. GitHub
-Actions runs the standard-library tests on Windows, Ubuntu, and macOS. Linux
-musl/Alpine, macOS Intel/Apple Silicon, daemon/service mode, long soak tests,
-firewall integrations, and Task Scheduler/systemd/launchd generation require
-those target environments and are not claimed as locally verified.
-
-The current release is an interactive Paper terminal dashboard. It does not
-yet provide `--daemon`/`--attach` supervisor mode, service-unit generation,
-automatic update scheduling, restore commands, RSS reporting, or full
-cross-platform firewall/keep-awake integration. Those features are deliberately
-not advertised as implemented.
+## Security
+Loopback only; Host header checked; POSTs must be same-origin JSON (or carry a custom header for uploads).
+All file access is confined to the server folder. `.env` is local and git-ignored. Public IP is never queried.

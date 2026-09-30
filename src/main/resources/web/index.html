@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MC Host - Minecraft Server Launcher</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div id="app">
+    <header id="topbar">
+      <div class="brand"><span class="cube"></span><b>MC HOST</b><small>Server Launcher</small></div>
+      <div class="top-right">
+        <button id="switcher" class="switcher"><img id="swIcon" alt=""><span id="swName">Servers</span><span class="chev">▾</span></button>
+        <span id="pill" class="pill off"><i></i><span id="pillText">CONNECTING</span></span>
+        <span id="clock"></span>
+      </div>
+    </header>
+    <nav id="sidebar"></nav>
+    <main id="content"><div id="view"></div></main>
+    <footer id="bottombar">
+      <button id="bbInfo" class="bb-select" title="Quick memory / version">
+        <span class="bb-label">SERVER</span>
+        <span id="bbInfoText">-</span>
+        <span class="chev">▾</span>
+      </button>
+      <div class="bb-mid">
+        <div class="bb-row"><span id="bbTask">Ready</span><span id="bbSub"></span></div>
+        <div class="bar" id="bbBar"><div class="fill" id="bbFill"></div></div>
+      </div>
+      <div class="bb-right">
+        <button id="btnRestart" class="btn" title="Restart server" hidden>↻ Restart</button>
+        <button id="btnPlay" class="play">START SERVER<small>-</small></button>
+      </div>
+    </footer>
+  </div>
+  <div id="toasts"></div>
+  <div id="overlay" class="hidden"></div>
+  <script src="/app.js"></script>
+</body>
+</html>
